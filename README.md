@@ -11,6 +11,22 @@ REST API сервис для управления заказами, товара
 
 ## Запуск проекта
 
+### Установка зависимостей
+pip install -r requirements.txt
+
+### Запуск PostgreSQL (требуется установленный Docker)
+docker run -d --name order_db -p 5432:5432 \
+  -e POSTGRES_DB=order_db \
+  -e POSTGRES_USER=user \
+  -e POSTGRES_PASSWORD=password \
+  postgres:13
+
+### Инициализация данных
+python scripts/init_data.py
+
+### Запуск сервера
+uvicorn app.main:app --reload
+
 ### Требования
 
 - Docker и Docker Compose
