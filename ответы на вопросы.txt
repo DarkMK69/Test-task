@@ -1,0 +1,397 @@
+┌─────────────────┐       ┌─────────────────┐
+│   categories    │       │ category_closure│
+├─────────────────┤       ├─────────────────┤
+│ id (PK)         │◄──────┤ ancestor_id (PK)│
+│ name            │       │ descendant_id(PK)│
+│ parent_id (FK)  │──────►│ depth           │
+└─────────────────┘       └─────────────────┘
+        │                         │
+        │                         │
+        ▼                         │
+┌─────────────────┐               │
+│    products     │               │
+├─────────────────┤               │
+│ id (PK)         │               │
+│ name            │               │
+│ quantity        │               │
+│ price           │               │
+│ category_id (FK)│───────────────┘
+└─────────────────┘
+        │
+        │
+        ▼
+┌─────────────────┐       ┌─────────────────┐
+│    clients      │       │    orders       │
+├─────────────────┤       ├─────────────────┤
+│ id (PK)         │◄──────┤ id (PK)         │
+│ name            │       │ client_id (FK)  │
+│ address         │       │ order_date      │
+└─────────────────┘       │ status          │
+                          └─────────────────┘
+                                  │
+                                  │
+                                  ▼
+                          ┌─────────────────┐
+                          │   order_items   │
+                          ├─────────────────┤
+                          │ id (PK)         │
+                          │ order_id (FK)   │
+                          │ product_id (FK) │
+                          │ quantity        │
+                          │ price           │
+                          └─────────────────┘
+
+
+Полный SQL DDL
+sql
+
+-- Дерево категорий
+CREATE TABLE categories (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    parent_id INTEGER REFERENCES categories(id) ON DELETE CASCADE
+);
+
+-- Closure table для иерархии категорий
+CREATE TABLE category_closure (
+    ancestor_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+    descendant_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+    depth INTEGER NOT NULL,
+    PRIMARY KEY (ancestor_id, descendant_id)
+);
+
+-- Товары
+CREATE TABLE products (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    quantity INTEGER NOT NULL CHECK (quantity >= 0),
+    price DECIMAL(10, 2) NOT NULL CHECK (price >= 0),
+    category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL
+);
+
+-- Клиенты
+CREATE TABLE clients (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    address TEXT NOT NULL
+);
+
+-- Заказы
+CREATE TABLE orders (
+    id SERIAL PRIMARY KEY,
+    client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    order_date TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    status VARCHAR(20) DEFAULT 'created'
+);
+
+-- Позиции заказа
+CREATE TABLE order_items (
+    id SERIAL PRIMARY KEY,
+    order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    quantity INTEGER NOT NULL CHECK (quantity > 0),
+    price DECIMAL(10, 2) NOT NULL CHECK (price >= 0),
+    UNIQUE (order_id, product_id)
+);
+
+-- Индексы для оптимизации
+CREATE INDEX idx_categories_parent ON categories(parent_id);
+CREATE INDEX idx_products_category ON products(category_id);
+CREATE INDEX idx_orders_client_date ON orders(client_id, order_date);
+CREATE INDEX idx_order_items_order ON order_items(order_id);
+CREATE INDEX idx_order_items_product ON order_items(product_id);
+CREATE INDEX idx_category_closure_depth ON category_closure(depth);
+CREATE INDEX idx_orders_date ON orders(order_date);
+
+
+
+
+
+
+
+
+2. SQL запросы по пункту 2
+
+2.1. Сумма товаров по клиентам
+
+
+
+SELECT 
+    c.name AS client_name,
+    COALESCE(SUM(oi.quantity * oi.price), 0) AS total_amount
+FROM clients c
+LEFT JOIN orders o ON o.client_id = c.id
+LEFT JOIN order_items oi ON oi.order_id = o.id
+GROUP BY c.id, c.name
+ORDER BY total_amount DESC;
+
+2.2. Количество дочерних элементов первого уровня
+
+
+SELECT 
+    parent.name AS category_name,
+    COUNT(child.id) AS first_level_children_count
+FROM categories parent
+LEFT JOIN categories child ON child.parent_id = parent.id
+GROUP BY parent.id, parent.name
+ORDER BY parent.name;
+
+2.3.1. Топ-5 самых покупаемых товаров за последний месяц
+
+
+CREATE VIEW top_5_products_last_month AS
+SELECT 
+    p.name AS product_name,
+    cat_lvl1.name AS first_level_category,
+    SUM(oi.quantity) AS total_sold_units
+FROM order_items oi
+JOIN orders o ON o.id = oi.order_id
+JOIN products p ON p.id = oi.product_id
+JOIN categories cat ON cat.id = p.category_id
+JOIN category_closure cc ON cc.descendant_id = cat.id AND cc.depth = 1
+JOIN categories cat_lvl1 ON cat_lvl1.id = cc.ancestor_id
+WHERE o.order_date >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
+  AND o.order_date < DATE_TRUNC('month', CURRENT_DATE)
+GROUP BY p.id, p.name, cat_lvl1.id, cat_lvl1.name
+ORDER BY total_sold_units DESC
+LIMIT 5;
+
+2.3.2. Оптимизация запроса и схемы данных
+
+Предложения по оптимизации:
+
+    Материализованное представление для ежедневного обновления:
+
+
+
+CREATE MATERIALIZED VIEW mv_top_products_monthly AS
+SELECT 
+    p.id AS product_id,
+    cat_lvl1.id AS category_id,
+    DATE_TRUNC('month', o.order_date) AS month_period,
+    SUM(oi.quantity) AS total_sold_units,
+    COUNT(DISTINCT o.id) AS order_count
+FROM order_items oi
+JOIN orders o ON o.id = oi.order_id
+JOIN products p ON p.id = oi.product_id
+JOIN categories cat ON cat.id = p.category_id
+JOIN category_closure cc ON cc.descendant_id = cat.id AND cc.depth = 1
+JOIN categories cat_lvl1 ON cat_lvl1.id = cc.ancestor_id
+GROUP BY p.id, cat_lvl1.id, DATE_TRUNC('month', o.order_date);
+
+CREATE UNIQUE INDEX idx_mv_top_products ON mv_top_products_monthly(product_id, category_id, month_period);
+
+    Партиционирование таблиц по дате:
+
+
+
+-- Для PostgreSQL 10+
+CREATE TABLE orders_partitioned (
+    LIKE orders INCLUDING ALL
+) PARTITION BY RANGE (order_date);
+
+CREATE TABLE orders_2024_01 PARTITION OF orders_partitioned
+    FOR VALUES FROM ('2024-01-01') TO ('2024-02-01');
+
+    Дополнительные индексы:
+
+
+
+CREATE INDEX idx_orders_date_status ON orders(order_date, status);
+CREATE INDEX idx_products_name_category ON products(name, category_id);
+CREATE INDEX idx_category_closure_ancestor ON category_closure(ancestor_id);
+
+    Кэширование часто запрашиваемых данных в Redis
+
+    Архивация старых заказов в отдельную таблицу
+
+3. REST-сервис по пункту 3
+Основной код сервиса
+
+app/main.py:
+python
+
+from fastapi import FastAPI, HTTPException, Depends
+from sqlalchemy.orm import Session
+from app import schemas, crud, database
+from app.exceptions import InsufficientStockException
+
+app = FastAPI(
+    title="Order Service API",
+    version="1.0.0",
+    description="REST API для управления заказами и товарами"
+)
+
+@app.get("/")
+async def root():
+    return {"message": "Order Service API"}
+
+@app.post("/orders/{order_id}/items/", response_model=schemas.OrderItem)
+def add_item_to_order(
+    order_id: int,
+    item: schemas.OrderItemCreate,
+    db: Session = Depends(database.get_db)
+):
+    """
+    Добавить товар в заказ.
+    
+    - Если товар уже есть в заказе, увеличивает количество
+    - Если товара нет в наличии, возвращает ошибку
+    """
+    try:
+        return crud.add_item_to_order(db, order_id, item.product_id, item.quantity)
+    except InsufficientStockException as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/products/{product_id}/stock", response_model=schemas.ProductStock)
+def check_product_stock(product_id: int, db: Session = Depends(database.get_db)):
+    """
+    Проверить наличие товара на складе
+    """
+    try:
+        return crud.get_product_stock(db, product_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@app.get("/health")
+def health_check():
+    """Проверка статуса сервиса"""
+    return {"status": "healthy"}
+
+app/crud.py:
+python
+
+from sqlalchemy.orm import Session
+from sqlalchemy import select
+from app import models, schemas
+from app.exceptions import InsufficientStockException
+
+def add_item_to_order(db: Session, order_id: int, product_id: int, quantity: int):
+    # Проверяем наличие товара
+    product = db.get(models.Product, product_id)
+    if not product:
+        raise ValueError("Product not found")
+    
+    if product.quantity < quantity:
+        raise InsufficientStockException(
+            f"Insufficient stock for product {product_id}. "
+            f"Available: {product.quantity}, Requested: {quantity}"
+        )
+    
+    # Проверяем существование заказа
+    order = db.get(models.Order, order_id)
+    if not order:
+        raise ValueError("Order not found")
+    
+    # Проверяем, есть ли уже такой товар в заказе
+    existing_item = db.execute(
+        select(models.OrderItem)
+        .where(models.OrderItem.order_id == order_id)
+        .where(models.OrderItem.product_id == product_id)
+    ).scalar_one_or_none()
+    
+    if existing_item:
+        # Увеличиваем количество
+        existing_item.quantity += quantity
+    else:
+        # Создаем новую позицию
+        existing_item = models.OrderItem(
+            order_id=order_id,
+            product_id=product_id,
+            quantity=quantity,
+            price=product.price
+        )
+        db.add(existing_item)
+    
+    # Уменьшаем количество на складе
+    product.quantity -= quantity
+    
+    db.commit()
+    db.refresh(existing_item)
+    return existing_item
+
+def get_product_stock(db: Session, product_id: int):
+    product = db.get(models.Product, product_id)
+    if not product:
+        raise ValueError("Product not found")
+    return {"product_id": product_id, "available_quantity": product.quantity}
+
+Примеры использования API
+
+Добавление товара в заказ:
+
+
+curl -X POST "http://localhost:8000/orders/1/items/" \
+  -H "Content-Type: application/" \
+  -d '{"product_id": 1, "quantity": 2}'
+
+Ответ при успехе:
+
+
+{
+  "id": 1,
+  "order_id": 1,
+  "product_id": 1,
+  "quantity": 2,
+  "price": 25000.0
+}
+
+Ответ при недостатке товара:
+
+
+{
+  "detail": "Insufficient stock for product 1. Available: 0, Requested: 2"
+}
+
+Проверка наличия товара:
+
+
+curl "http://localhost:8000/products/1/stock"
+
+Ответ:
+
+
+{
+  "product_id": 1,
+  "available_quantity": 8
+}
+
+Тестовые данные
+
+После запуска создаются тестовые данные:
+
+    Категории: Бытовая техника → Холодильники → однокамерные/двухкамерные
+
+    Товары: 6 товаров с разным количеством и ценами
+
+    Клиенты: 2 клиента
+
+    Заказы: 2 пустых заказа
+
+Документация API
+
+После запуска доступно:
+
+    Swagger UI: http://localhost:8000/docs
+
+    ReDoc: http://localhost:8000/redoc
+
+4. Запуск и развертывание
+
+Docker Compose:
+
+
+sudo docker-compose up -d
+
+Проверка работы:
+
+
+curl http://localhost:8000/health
+# {"status":"healthy"}
+
+curl http://localhost:8000/products/1/stock
+# {"product_id":1,"available_quantity":10}
